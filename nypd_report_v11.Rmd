@@ -1,0 +1,341 @@
+---
+title: "Demographic Patterns in NYPD Shooting Incidents"
+author: "Virgil Tornoreanu"
+date: "October 6, 2025"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    fig_caption: true
+    number_sections: true
+    toc: true
+    toc_depth: 2
+  html_document:
+    toc: true
+    toc_depth: '2'
+    df_print: paged
+header-includes:
+- \usepackage[section]{placeins}
+- \usepackage{float}
+---
+
+\clearpage
+
+```{r setup, include=FALSE}
+# Global knitr options: controlled figure sizing + strict placement to avoid TOC/page ordering issues
+knitr::opts_chunk$set(
+  echo = FALSE, message = FALSE, warning = FALSE, error = FALSE,
+  fig.align = "center",
+  fig.width = 7, fig.height = 4.2,
+  out.width = "95%",
+  dev = "png", dpi = 300, fig.path = "figures_doc/",
+  fig.pos = "H"   # place figures exactly here (requires float pkg)
+)
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(lubridate)
+  library(scales)
+  library(forcats)
+  library(readr)
+  library(tidyr)
+  library(RColorBrewer)
+  library(stringr)
+})
+
+# Slide PNG export folder
+fig_dir <- "figures"
+if (!dir.exists(fig_dir)) dir.create(fig_dir, recursive = TRUE)
+save_png <- function(p, filename, width=9, height=5.2, dpi=300){
+  ggsave(file.path(fig_dir, filename), plot=p, width=width, height=height, dpi=dpi)
+}
+
+# Colors & theme
+brand_blue <- "#2C7BE5"
+brand_gray <- "#6c757d"
+theme_set(
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face="bold", size=14, margin=margin(b=6)),
+      plot.subtitle = element_text(color=brand_gray, margin=margin(b=10)),
+      axis.title = element_text(face="bold"),
+      panel.grid.minor = element_blank()
+    )
+)
+
+# Data
+url  <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+nypd <- read_csv(url, show_col_types = FALSE)
+
+# Flexible column mapping
+nm <- names(nypd)
+col_pick <- function(...) { opts <- c(...); hit <- opts[opts %in% nm]; if (length(hit)) hit[1] else NA_character_ }
+COL_OCCUR_DATE   <- col_pick("OCCUR_DATE","CMPLNT_FR_DT","INCIDENT_DATE","RPT_DT")
+COL_OCCUR_TIME   <- col_pick("OCCUR_TIME","CMPLNT_FR_TM","INCIDENT_TIME")
+COL_BORO         <- col_pick("BORO","BORO_NM","BOROUGH")
+COL_VIC_SEX      <- col_pick("VIC_SEX","VICTIM_SEX")
+COL_PERP_SEX     <- col_pick("PERP_SEX","SUSPECT_SEX")
+COL_VIC_RACE     <- col_pick("VIC_RACE","VICTIM_RACE")
+COL_PERP_RACE    <- col_pick("PERP_RACE","SUSPECT_RACE")
+COL_VIC_AGE_GRP  <- col_pick("VIC_AGE_GROUP","VICTIM_AGE_GROUP")
+
+pull_safe_chr <- function(df, col) if (!is.na(col)) as.character(df[[col]]) else NA_character_
+
+# Borough standardization
+standardize_boro <- function(x){
+  y <- str_trim(tolower(as.character(x)))
+  dplyr::case_when(
+    y %in% c("manhattan","mn","ny","new york","new york county") ~ "Manhattan",
+    y %in% c("bronx","bx") ~ "Bronx",
+    y %in% c("brooklyn","bk","kings","kings county") ~ "Brooklyn",
+    y %in% c("queens","qn") ~ "Queens",
+    y %in% c("staten island","si","richmond","richmond county","statenisland") ~ "Staten Island",
+    TRUE ~ "Unknown"
+  )
+}
+boro_levels <- c("Manhattan","Bronx","Brooklyn","Queens","Staten Island","Unknown")
+
+# Clean & enrich
+nypd <- nypd |>
+  mutate(
+    OCCUR_DATE = if (!is.na(COL_OCCUR_DATE)) lubridate::mdy(pull_safe_chr(nypd, COL_OCCUR_DATE)) else as.Date(NA),
+    YEAR       = year(OCCUR_DATE),
+    MONTH      = month(OCCUR_DATE, label = TRUE, abbr = TRUE),
+    DOW        = wday(OCCUR_DATE, label = TRUE, abbr = TRUE, week_start = 1),
+    OCCUR_TIME_chr = pull_safe_chr(nypd, COL_OCCUR_TIME),
+    HOUR = suppressWarnings(as.integer(substr(OCCUR_TIME_chr, 1, 2))),
+    HOUR = ifelse(!is.na(HOUR) & dplyr::between(HOUR,0,23), HOUR, NA_integer_),
+    BORO_raw    = pull_safe_chr(nypd, COL_BORO),
+    BORO        = standardize_boro(BORO_raw),
+    VIC_SEX      = pull_safe_chr(nypd, COL_VIC_SEX),
+    PERP_SEX     = pull_safe_chr(nypd, COL_PERP_SEX),
+    VICTIM_RACE  = pull_safe_chr(nypd, COL_VIC_RACE),
+    PERP_RACE    = pull_safe_chr(nypd, COL_PERP_RACE),
+    VIC_AGE_GROUP= pull_safe_chr(nypd, COL_VIC_AGE_GRP)
+  ) |>
+  mutate(
+    BORO         = factor(BORO, levels = boro_levels),
+    VIC_SEX      = factor(VIC_SEX,  levels=c("M","F","U")),
+    PERP_SEX     = factor(PERP_SEX, levels=c("M","F","U")),
+    VICTIM_RACE  = str_to_title(replace_na(VICTIM_RACE, "Unknown")),
+    PERP_RACE    = str_to_title(replace_na(PERP_RACE,   "Unknown")),
+    VIC_AGE_GROUP= replace_na(VIC_AGE_GROUP, "Unknown"),
+    VIC_AGE_GROUP= factor(VIC_AGE_GROUP, levels=c("0-11","12-17","18-24","25-44","45-64","65+","Unknown"))
+  ) |>
+  filter(!is.na(YEAR), YEAR >= 2008)
+
+order_by_count <- function(x){ forcats::fct_reorder(x, .x = x, .fun = function(v) -length(v)) }
+```
+
+# Introduction
+
+This report analyzes **demographic and temporal patterns** in *NYPD Shooting Incidents* from 2008 to the present.  
+It visualizes trends by year, gender, race, age, and borough.  
+Each chart is also saved as a 300-DPI PNG inside the `figures/` folder for slides.
+
+```{r kpis}
+kpi <- nypd |>
+  summarise(
+    total_incidents = n(),
+    start_year = min(YEAR, na.rm=TRUE),
+    end_year   = max(YEAR, na.rm=TRUE),
+    pct_male_victims = mean(VIC_SEX=="M", na.rm=TRUE)
+  )
+```
+
+# Yearly Trend
+
+```{r fig.cap="Incidents by Year (2008–Present). Long decline until 2019, then a pandemic-era spike."}
+yearly <- nypd |> count(YEAR, name="Incidents")
+p_year <- ggplot(yearly, aes(YEAR, Incidents)) +
+  geom_line(linewidth=1.1, color=brand_blue) +
+  geom_point(size=2.2, alpha=0.95, color=brand_blue) +
+  scale_y_continuous(labels=comma) +
+  labs(x="Year", y="Incidents")
+save_png(p_year, "01_trend_year.png")
+p_year
+```
+
+# Seasonality
+
+```{r fig.cap="Incidents by Month (All Years Combined). Slight summer lift."}
+monthly <- nypd |> count(MONTH, name="Incidents")
+p_month <- ggplot(monthly, aes(MONTH, Incidents, group=1)) +
+  geom_line(linewidth=1.1, color=brand_blue) +
+  geom_point(size=2.2, alpha=0.95, color=brand_blue) +
+  labs(x="Month", y="Incidents")
+save_png(p_month, "02_seasonality_month.png")
+p_month
+```
+
+# Timing Heatmap
+
+```{r fig.height=4.8, fig.cap="When Do Incidents Happen? Heatmap by Hour × Day of Week."}
+dow_hour <- nypd |> filter(!is.na(DOW), !is.na(HOUR)) |> count(DOW, HOUR, name="Incidents")
+p_heat <- ggplot(dow_hour, aes(HOUR, DOW, fill=Incidents)) +
+  geom_tile() +
+  scale_fill_gradient(low="#FDE725", high="#440154", name="Incidents") +
+  labs(x="Hour of Day", y="Day of Week")
+save_png(p_heat, "03_heatmap_dow_hour.png", height=5.2)
+p_heat
+```
+
+# Victim Gender
+
+```{r fig.cap="Victim Gender Distribution. Men account for over 90% of all victims."}
+vic_sex <- nypd |>
+  filter(!is.na(VIC_SEX)) |>
+  count(VIC_SEX, name="Count") |>
+  mutate(pct = Count/sum(Count)) |>
+  mutate(in_bar = Count >= 0.1 * max(Count))
+
+p_vic_sex <- ggplot(vic_sex, aes(VIC_SEX, Count, fill=VIC_SEX)) +
+  geom_col(width=0.7) +
+  geom_text(aes(label=scales::percent(pct, accuracy=0.1),
+                vjust = ifelse(in_bar, 1.2, -0.25),
+                color = ifelse(in_bar, "white", "black")),
+            size=3.4, show.legend = FALSE) +
+  scale_color_identity() +
+  scale_fill_brewer(palette="Set2", guide="none") +
+  scale_y_continuous(labels=comma, expand=expansion(mult=c(0,0.08))) +
+  labs(x="Gender", y="Count")
+save_png(p_vic_sex, "04_victim_gender.png")
+p_vic_sex
+```
+
+# Victim Race
+
+```{r fig.cap="Victim Race Distribution. Higher shares among Black and Hispanic communities."}
+vic_race <- nypd |>
+  filter(!is.na(VICTIM_RACE), VICTIM_RACE != "") |>
+  mutate(VICTIM_RACE = order_by_count(VICTIM_RACE)) |>
+  count(VICTIM_RACE, name="Count") |>
+  mutate(pct = Count/sum(Count),
+         in_bar = Count >= 0.1 * max(Count))
+
+p_vic_race <- ggplot(vic_race, aes(VICTIM_RACE, Count, fill=VICTIM_RACE)) +
+  geom_col() +
+  geom_text(aes(label=scales::percent(pct, accuracy=0.1),
+                vjust = ifelse(in_bar, 1.2, -0.25),
+                color = ifelse(in_bar, "white", "black")),
+            size=3.0, show.legend = FALSE) +
+  scale_color_identity() +
+  scale_fill_brewer(palette="Set2", guide="none") +
+  labs(x="Race", y="Count") +
+  theme(axis.text.x = element_text(angle=45, hjust=1))
+save_png(p_vic_race, "05_victim_race.png")
+p_vic_race
+```
+
+# Suspect Race
+
+```{r fig.cap="Suspect Race Distribution. Similar pattern to victim distribution."}
+perp_race <- nypd |>
+  filter(!is.na(PERP_RACE), PERP_RACE != "") |>
+  mutate(PERP_RACE = order_by_count(PERP_RACE)) |>
+  count(PERP_RACE, name="Count") |>
+  mutate(pct = Count/sum(Count),
+         in_bar = Count >= 0.1 * max(Count))
+
+p_perp_race <- ggplot(perp_race, aes(PERP_RACE, Count, fill=PERP_RACE)) +
+  geom_col() +
+  geom_text(aes(label=scales::percent(pct, accuracy=0.1),
+                vjust = ifelse(in_bar, 1.2, -0.25),
+                color = ifelse(in_bar, "white", "black")),
+            size=3.0, show.legend = FALSE) +
+  scale_color_identity() +
+  scale_fill_brewer(palette="Set2", guide="none") +
+  labs(x="Race", y="Count") +
+  theme(axis.text.x = element_text(angle=45, hjust=1))
+save_png(p_perp_race, "06_suspect_race.png")
+p_perp_race
+```
+
+# Victim Age Group
+
+```{r fig.cap="Victim Age Group. Most victims are 18–44."}
+vic_age <- nypd |>
+  filter(!is.na(VIC_AGE_GROUP)) |>
+  mutate(VIC_AGE_GROUP = fct_relevel(replace_na(VIC_AGE_GROUP,"Unknown"),
+                                     "0-11","12-17","18-24","25-44","45-64","65+","Unknown")) |>
+  count(VIC_AGE_GROUP, name="Count") |>
+  mutate(pct = Count/sum(Count),
+         in_bar = Count >= 0.1 * max(Count))
+
+p_vic_age <- ggplot(vic_age, aes(VIC_AGE_GROUP, Count, fill=VIC_AGE_GROUP)) +
+  geom_col(width=0.7) +
+  geom_text(aes(label=scales::percent(pct, accuracy=0.1),
+                vjust = ifelse(in_bar, 1.2, -0.25),
+                color = ifelse(in_bar, "white", "black")),
+            size=3.0, show.legend = FALSE) +
+  scale_color_identity() +
+  scale_fill_brewer(palette="Set2", guide="none") +
+  scale_y_continuous(labels=comma) +
+  labs(x="Age Group", y="Count")
+save_png(p_vic_age, "07_victim_age.png")
+p_vic_age
+```
+
+# Borough Comparison
+
+```{r fig.cap="Incidents by Borough (Stacked by Victim Gender). Bronx and Brooklyn dominate; male majority everywhere."}
+# Keep legend (Male/Female only), remove 'Unknown' borough and 'U' gender
+boro_sex <- nypd |>
+  filter(BORO != "Unknown", VIC_SEX %in% c("M","F")) |>
+  mutate(BORO = fct_relevel(BORO, "Manhattan","Bronx","Brooklyn","Queens","Staten Island")) |>
+  count(BORO, VIC_SEX, name="Count") |>
+  group_by(BORO) |>
+  mutate(pct = Count/sum(Count)) |>
+  ungroup()
+
+boro_totals_for_labels <- boro_sex |>
+  group_by(BORO) |>
+  summarise(Total = sum(Count), .groups="drop")
+
+p_boro_sex <- ggplot(boro_sex, aes(BORO, Count, fill=VIC_SEX)) +
+  geom_col(position="stack", width=0.75) +
+  geom_text(aes(label=ifelse(pct >= 0.10, scales::percent(pct, accuracy=0.1), "")),
+            position=position_stack(vjust=0.5), size=3.0, color="white") +
+  geom_text(data=boro_totals_for_labels, aes(BORO, Total, label=scales::comma(Total)),
+            vjust=-0.35, fontface="bold", inherit.aes = FALSE, size=3.2) +
+  scale_fill_brewer(palette="Set2", labels=c(F="Female", M="Male"), name="Victim Gender") +
+  scale_y_continuous(labels=comma, expand=expansion(mult=c(0,0.08))) +
+  labs(x="Borough", y="Incidents")
+save_png(p_boro_sex, "08_borough_victim_gender.png")
+p_boro_sex
+```
+
+# Borough Totals
+
+```{r fig.cap="Incidents by Borough (Totals). Bronx and Brooklyn highest; Staten Island lowest."}
+boro_tot <- nypd |>
+  filter(BORO != "Unknown") |>
+  mutate(BORO = fct_relevel(BORO, "Manhattan","Bronx","Brooklyn","Queens","Staten Island")) |>
+  count(BORO, name="Incidents") |>
+  mutate(pct = Incidents/sum(Incidents))
+
+p_boro <- ggplot(boro_tot, aes(BORO, Incidents, fill=BORO)) +
+  geom_col(width=0.7) +
+  geom_text(aes(label=scales::percent(pct, accuracy=0.1),
+                hjust = ifelse(Incidents >= 0.12 * max(Incidents), 1.05, -0.15),
+                color = ifelse(Incidents >= 0.12 * max(Incidents), "white", "black")),
+            size=3.2) +
+  scale_color_identity() +
+  coord_flip() +
+  scale_fill_brewer(palette="Set2", guide="none") +
+  scale_y_continuous(labels=comma, expand=expansion(mult=c(0,0.08))) +
+  labs(x="Borough", y="Incidents")
+save_png(p_boro, "09_borough_totals.png")
+p_boro
+```
+
+# Appendix: Figure Notes (for Slides)
+
+- **Trend:** From 2008 to 2019, shootings declined, then spiked during COVID-19 years.  
+- **Seasonality:** Slight summer lift; July–August peaks.  
+- **Timing:** Late-night peaks, especially Fri–Sun (heatmap).  
+- **Gender:** Over 90% male victims.  
+- **Victim Race:** Higher shares among Black and Hispanic communities.  
+- **Suspect Race:** Mirrors victim distribution.  
+- **Age:** Mostly 18–44.  
+- **Borough × Gender:** Bronx and Brooklyn dominate; male majority everywhere.  
+- **Borough Totals:** Bronx and Brooklyn highest; Staten Island lowest.
