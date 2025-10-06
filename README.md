@@ -1,7 +1,6 @@
 # Data Science as a Field — NYPD Shooting Incident Report
 
-**Repository:** https://github.com/virgiltornoreanu/nypd-shooting-report  
-
+**Repository:** https://github.com/VTornoreanu/nypd-shooting-report/
 ---
 
 ## 1️⃣ Reproducible Report
